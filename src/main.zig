@@ -1,8 +1,16 @@
 pub fn main() !void {
     const driver = try Driver.init("/dev/accel/accel0");
     defer driver.deinit();
-    const version = try driver.queryAieVersion();
-    std.debug.print("{}\n", .{version});
+
+    const aie_version = try driver.queryAieVersion();
+    std.debug.print("aie version: {}.{}\n", .{ aie_version.major, aie_version.minor });
+    const fw_version = try driver.queryFirmwareVersion();
+    std.debug.print("fw version: {}.{}.{} build {}\n", .{ fw_version.major, fw_version.minor, fw_version.patch, fw_version.build });
+
+    const dev_heap_bo = try driver.createBo(.dev_heap, 64 << 20); // 64MB
+    defer driver.destroyBo(dev_heap_bo);
+    const hwctx = try driver.createHwctx();
+    defer driver.destroyHwctx(hwctx);
 }
 
 const Driver = struct {
@@ -19,19 +27,68 @@ const Driver = struct {
         std.posix.close(self.fd);
     }
 
-    pub fn queryAieVersion(self: Self) !amdxdna.GetInfo.QueryAieVersion {
-        var version: amdxdna.GetInfo.QueryAieVersion = undefined;
-        var get_info = amdxdna.GetInfo{
-            .param = .query_aie_version,
-            .buffer = @intFromPtr(&version),
-            .buffer_size = @sizeOf(amdxdna.GetInfo.QueryAieVersion),
+    fn getInfo(self: Self, comptime T: type, param: amdxdna.GetInfo.Param) !T {
+        var param_data: T = undefined;
+        const get_info = amdxdna.GetInfo{
+            .param = param,
+            .buffer = @intFromPtr(&param_data),
+            .buffer_size = @sizeOf(T),
         };
-        const r = std.os.linux.ioctl(self.fd, amdxdna.get_info_ioctl, @intFromPtr(&get_info));
-        if (r != 0) {
-            std.debug.print("{x}\n", .{r});
-            return error.Fail;
-        }
-        return version;
+        try self.ioctl(amdxdna.get_info_ioctl, &get_info);
+        return param_data;
+    }
+
+    pub fn queryAieVersion(self: Self) !amdxdna.GetInfo.QueryAieVersion {
+        return self.getInfo(amdxdna.GetInfo.QueryAieVersion, .query_aie_version);
+    }
+
+    pub fn queryFirmwareVersion(self: Self) !amdxdna.GetInfo.QueryFirmwareVersion {
+        return self.getInfo(amdxdna.GetInfo.QueryFirmwareVersion, .query_firmware_version);
+    }
+
+    pub fn createBo(self: Self, ty: amdxdna.CreateBo.Type, size: u64) !u32 {
+        var create_bo = amdxdna.CreateBo{ .type = ty, .size = size };
+        try self.ioctl(amdxdna.create_bo_ioctl, &create_bo);
+        return create_bo.handle;
+    }
+
+    pub fn destroyBo(self: Self, handle: u32) void {
+        const gem_close = drm.GemClose{ .handle = handle };
+        self.ioctl(drm.gem_close_ioctl, &gem_close) catch {
+            std.log.warn("destroyBo failed\n", .{});
+        };
+    }
+
+    pub fn createHwctx(self: Self) !u32 {
+        const qos_info = amdxdna.QosInfo{
+            .gops = 0,
+            .fps = 0,
+            .dma_bandwidth = 0,
+            .latency = 0,
+            .frame_exec_time = 0,
+            .priority = 0,
+        };
+        var create_hwctx = amdxdna.CreateHwctx{
+            .qos_p = @intFromPtr(&qos_info),
+            .umq_bo = 0,
+            .log_buf_bo = 0,
+            .max_opc = 0,
+            .num_tiles = 0,
+            .mem_size = 0,
+        };
+        try self.ioctl(amdxdna.create_hwctx_ioctl, &create_hwctx);
+        return create_hwctx.handle;
+    }
+
+    pub fn destroyHwctx(self: Self, handle: u32) void {
+        const destroy_hwctx = amdxdna.DestroyHwctx{ .handle = handle };
+        self.ioctl(amdxdna.destroy_hwctx_ioctl, &destroy_hwctx) catch {
+            std.log.warn("destroyHwctx failed\n", .{});
+        };
+    }
+
+    pub fn ioctl(self: Self, request: u32, arg: anytype) !void {
+        if (std.os.linux.ioctl(self.fd, request, @intFromPtr(arg)) != 0) return error.Fail;
     }
 };
 
@@ -154,6 +211,13 @@ const amdxdna = struct {
             major: u32,
             minor: u32,
         };
+
+        pub const QueryFirmwareVersion = extern struct {
+            major: u32,
+            minor: u32,
+            patch: u32,
+            build: u32,
+        };
     };
 
     pub const create_hwctx_ioctl = drm.iowr(drm.command_base + 0x0, CreateHwctx);
@@ -167,9 +231,18 @@ const amdxdna = struct {
 };
 
 const drm = struct {
+    pub const GemClose = extern struct {
+        handle: u32,
+        pad: u32 = 0,
+    };
+
     pub const ioctl_base = 'd';
     pub const command_base = 0x40;
+    pub const gem_close_ioctl = drm.iow(0x09, GemClose);
 
+    pub fn iow(nr: u8, comptime T: type) u32 {
+        return std.os.linux.IOCTL.IOW(ioctl_base, nr, T);
+    }
     pub fn iowr(nr: u8, comptime T: type) u32 {
         return std.os.linux.IOCTL.IOWR(ioctl_base, nr, T);
     }
