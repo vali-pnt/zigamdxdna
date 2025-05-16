@@ -20,14 +20,17 @@ const Driver = struct {
     }
 
     pub fn queryAieVersion(self: Self) !amdxdna.GetInfo.QueryAieVersion {
-        const version: amdxdna.GetInfo.QueryAieVersion = undefined;
+        var version: amdxdna.GetInfo.QueryAieVersion = undefined;
         var get_info = amdxdna.GetInfo{
             .param = .query_aie_version,
             .buffer = @intFromPtr(&version),
             .buffer_size = @sizeOf(amdxdna.GetInfo.QueryAieVersion),
         };
         const r = std.os.linux.ioctl(self.fd, amdxdna.get_info_ioctl, @intFromPtr(&get_info));
-        if (r != 0) return error.Fail;
+        if (r != 0) {
+            std.debug.print("{x}\n", .{r});
+            return error.Fail;
+        }
         return version;
     }
 };
