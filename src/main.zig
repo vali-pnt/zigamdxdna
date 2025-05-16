@@ -220,6 +220,31 @@ const amdxdna = struct {
         };
     };
 
+    pub const SetState = extern struct {
+        param: Param,
+        buffer_size: u32,
+        buffer: u64,
+
+        pub const Param = enum(u32) {
+            set_power_mode = 0,
+            write_aie_mem = 1,
+            write_aie_reg = 2,
+        };
+
+        pub const SetPowerMode = extern struct {
+            power_mode: Type,
+            pad: [7]u8,
+
+            pub const Type = enum(u8) {
+                default = 0,
+                low = 1,
+                medium = 2,
+                high = 3,
+                turbo = 4,
+            };
+        };
+    };
+
     pub const create_hwctx_ioctl = drm.iowr(drm.command_base + 0x0, CreateHwctx);
     pub const destroy_hwctx_ioctl = drm.iowr(drm.command_base + 0x1, DestroyHwctx);
     pub const config_hwctx_ioctl = drm.iowr(drm.command_base + 0x2, ConfigHwctx);
@@ -228,6 +253,7 @@ const amdxdna = struct {
     pub const sync_bo_ioctl = drm.iowr(drm.command_base + 0x5, SyncBo);
     pub const exec_cmd_ioctl = drm.iowr(drm.command_base + 0x6, ExecCmd);
     pub const get_info_ioctl = drm.iowr(drm.command_base + 0x7, ExecCmd);
+    pub const set_state_ioctl = drm.iowr(drm.command_base + 0x8, SetState);
 };
 
 const drm = struct {
