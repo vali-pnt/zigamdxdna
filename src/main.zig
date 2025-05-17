@@ -2,10 +2,16 @@ pub fn main() !void {
     const driver = try Driver.init("/dev/accel/accel0");
     defer driver.deinit();
 
-    const aie_version = try driver.queryAieVersion();
+    const aie_metadata = try driver.queryAieMetadata();
+    const aie_version = aie_metadata.version;
     std.debug.print("aie version: {}.{}\n", .{ aie_version.major, aie_version.minor });
     const fw_version = try driver.queryFirmwareVersion();
     std.debug.print("fw version: {}.{}.{} build {}\n", .{ fw_version.major, fw_version.minor, fw_version.patch, fw_version.build });
+    std.debug.print("col size: {}\n", .{aie_metadata.col_size});
+    std.debug.print("cols: {}, rows: {}\n", .{ aie_metadata.cols, aie_metadata.rows });
+    printTileMetadata("core", aie_metadata.core);
+    printTileMetadata("mem", aie_metadata.mem);
+    printTileMetadata("shim", aie_metadata.shim);
 
     const dev_heap_size = 64 * 1024 * 1024; // 64MB
     const dev_heap_bo = try driver.createBo(.dev_heap, dev_heap_size);
@@ -23,6 +29,14 @@ pub fn main() !void {
 
     const hwctx = try driver.createHwctx();
     defer driver.destroyHwctx(hwctx);
+}
+
+fn printTileMetadata(name: []const u8, tile: amdxdna.GetInfo.QueryAieMetadata.Tile) void {
+    std.debug.print("{s}: row", .{name});
+    if (tile.row_count > 1) {
+        std.debug.print("s {}:{}", .{ tile.row_start, tile.row_start + tile.row_count - 1 });
+    } else std.debug.print(" {}", .{tile.row_start});
+    std.debug.print(", dma channels: {}, locks: {}, event regs: {}\n", .{ tile.dma_channel_count, tile.lock_count, tile.event_reg_count });
 }
 
 const Driver = struct {
@@ -48,6 +62,10 @@ const Driver = struct {
         };
         try self.ioctl(amdxdna.get_info_ioctl, &get_info);
         return param_data;
+    }
+
+    pub fn queryAieMetadata(self: Self) !amdxdna.GetInfo.QueryAieMetadata {
+        return self.getInfo(amdxdna.GetInfo.QueryAieMetadata, .query_aie_metadata);
     }
 
     pub fn queryAieVersion(self: Self) !amdxdna.GetInfo.QueryAieVersion {
@@ -101,7 +119,7 @@ const Driver = struct {
             .umq_bo = 0,
             .log_buf_bo = 0,
             .max_opc = 0,
-            .num_tiles = 0,
+            .num_tiles = 6,
             .mem_size = 0,
         };
         try self.ioctl(amdxdna.create_hwctx_ioctl, &create_hwctx);
@@ -233,6 +251,25 @@ const amdxdna = struct {
             query_hw_contexts = 5,
             query_firmware_version = 8,
             get_power_mode = 9,
+        };
+
+        pub const QueryAieMetadata = extern struct {
+            col_size: u32,
+            cols: u16,
+            rows: u16,
+            version: QueryAieVersion,
+            core: Tile,
+            mem: Tile,
+            shim: Tile,
+
+            pub const Tile = extern struct {
+                row_count: u16,
+                row_start: u16,
+                dma_channel_count: u16,
+                lock_count: u16,
+                event_reg_count: u16,
+                pad: [3]u16,
+            };
         };
 
         pub const QueryAieVersion = extern struct {
