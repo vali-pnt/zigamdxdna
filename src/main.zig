@@ -15,7 +15,7 @@ pub fn main() !void {
         null,
         dev_heap_size,
         std.os.linux.PROT.READ | std.os.linux.PROT.WRITE,
-        .{ .TYPE = .SHARED, .LOCKED = true },
+        .{ .TYPE = .SHARED },
         driver.fd,
         dev_heap_bo_info.map_offset,
     );
@@ -79,7 +79,7 @@ const Driver = struct {
 
     pub fn getBoInfo(self: Self, handle: u32) !BoInfo {
         var get_bo_info = amdxdna.GetBoInfo{ .handle = handle };
-        try self.ioctl(amdxdna.GetBoInfo, &get_bo_info);
+        try self.ioctl(amdxdna.get_bo_info_ioctl, &get_bo_info);
         return .{
             .map_offset = get_bo_info.map_offset,
             .vaddr = get_bo_info.vaddr,
