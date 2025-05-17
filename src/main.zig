@@ -7,8 +7,20 @@ pub fn main() !void {
     const fw_version = try driver.queryFirmwareVersion();
     std.debug.print("fw version: {}.{}.{} build {}\n", .{ fw_version.major, fw_version.minor, fw_version.patch, fw_version.build });
 
-    const dev_heap_bo = try driver.createBo(.dev_heap, 64 << 20); // 64MB
+    const dev_heap_size = 64 * 1024 * 1024; // 64MB
+    const dev_heap_bo = try driver.createBo(.dev_heap, dev_heap_size);
     defer driver.destroyBo(dev_heap_bo);
+    const dev_heap_bo_info = try driver.getBoInfo(dev_heap_bo);
+    const dev_heap_bo_map = try std.posix.mmap(
+        null,
+        dev_heap_size,
+        std.os.linux.PROT.READ | std.os.linux.PROT.WRITE,
+        .{ .TYPE = .SHARED, .LOCKED = true },
+        driver.fd,
+        dev_heap_bo_info.map_offset,
+    );
+    defer std.posix.munmap(dev_heap_bo_map);
+
     const hwctx = try driver.createHwctx();
     defer driver.destroyHwctx(hwctx);
 }
@@ -56,6 +68,22 @@ const Driver = struct {
         const gem_close = drm.GemClose{ .handle = handle };
         self.ioctl(drm.gem_close_ioctl, &gem_close) catch {
             std.log.warn("destroyBo failed\n", .{});
+        };
+    }
+
+    pub const BoInfo = struct {
+        map_offset: u64,
+        vaddr: u64,
+        xdna_vaddr: u64,
+    };
+
+    pub fn getBoInfo(self: Self, handle: u32) !BoInfo {
+        var get_bo_info = amdxdna.GetBoInfo{ .handle = handle };
+        try self.ioctl(amdxdna.GetBoInfo, &get_bo_info);
+        return .{
+            .map_offset = get_bo_info.map_offset,
+            .vaddr = get_bo_info.vaddr,
+            .xdna_vaddr = get_bo_info.xdna_vaddr,
         };
     }
 
