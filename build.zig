@@ -16,6 +16,19 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    const trace_exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/trace.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const trace_exe = b.addExecutable(.{
+        .name = "xdnatrace",
+        .root_module = trace_exe_mod,
+    });
+    b.installArtifact(trace_exe);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
