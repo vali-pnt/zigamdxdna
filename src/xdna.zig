@@ -42,12 +42,12 @@ pub const ConfigHwctx = extern struct {
     pub const CuConfig = extern struct {
         cu_bo: u32,
         cu_func: u8,
-        pad: [3]u8,
+        pad: [3]u8 = std.mem.zeroes([3]u8),
     };
 
     pub const ConfigCu = extern struct {
         num_cus: u16,
-        pad: [3]u16,
+        pad: [3]u16 = std.mem.zeroes([3]u16),
         cu_configs: [0]CuConfig,
 
         pub fn init(gpa: std.mem.Allocator, cu_configs: []CuConfig) !*ConfigCu {
@@ -125,6 +125,14 @@ pub const ExecCmd = extern struct {
     };
 };
 
+pub const PowerModeType = enum(u8) {
+    default = 0,
+    low = 1,
+    medium = 2,
+    high = 3,
+    turbo = 4,
+};
+
 pub const GetInfo = extern struct {
     param: Param,
     buffer_size: u32,
@@ -139,6 +147,12 @@ pub const GetInfo = extern struct {
         query_hw_contexts = 5,
         query_firmware_version = 8,
         get_power_mode = 9,
+    };
+
+    pub const QueryAieStatus = extern struct {
+        buffer: u64,
+        buffer_size: u32,
+        cols_filled: u32,
     };
 
     pub const QueryAieMetadata = extern struct {
@@ -156,7 +170,7 @@ pub const GetInfo = extern struct {
             dma_channel_count: u16,
             lock_count: u16,
             event_reg_count: u16,
-            pad: [3]u16,
+            pad: [3]u16 = std.mem.zeroes([3]u16),
         };
     };
 
@@ -165,11 +179,57 @@ pub const GetInfo = extern struct {
         minor: u32,
     };
 
+    pub const QueryClockMetadata = extern struct {
+        mp_npu_clock: Clock,
+        h_clock: Clock,
+
+        pub const Clock = extern struct {
+            name: [16]u8,
+            freq_mhz: u32,
+            pad: u32 = 0,
+        };
+    };
+
+    pub const QuerySensor = extern struct {
+        label: [64]u8,
+        input: u32,
+        max: u32,
+        average: u32,
+        highest: u32,
+        status: [64]u8,
+        units: [16]u8,
+        unitm: i8,
+        type: Type,
+        pad: [6]u8 = std.mem.zeroes([6]u8),
+
+        pub const Type = enum(u8) {
+            power = 0,
+        };
+    };
+
+    pub const QueryHwContext = extern struct {
+        context_id: u32,
+        start_col: u32,
+        num_col: u32,
+        pad: u32 = 0,
+        pid: i64,
+        command_submissions: u64,
+        command_completions: u64,
+        migrations: u64,
+        preemptions: u64,
+        errors: u64,
+    };
+
     pub const QueryFirmwareVersion = extern struct {
         major: u32,
         minor: u32,
         patch: u32,
         build: u32,
+    };
+
+    pub const GetPowerMode = extern struct {
+        power_mode: PowerModeType,
+        pad: [7]u8 = std.mem.zeroes([7]u8),
     };
 };
 
@@ -185,15 +245,54 @@ pub const SetState = extern struct {
     };
 
     pub const SetPowerMode = extern struct {
-        power_mode: Type,
-        pad: [7]u8,
+        power_mode: PowerModeType,
+        pad: [7]u8 = std.mem.zeroes([7]u8),
+    };
+};
 
-        pub const Type = enum(u8) {
-            default = 0,
-            low = 1,
-            medium = 2,
-            high = 3,
-            turbo = 4,
+pub const GetArray = extern struct {
+    param: Param,
+    element_size: u32,
+    num_element: u32,
+    pad: u32 = 0,
+    buffer: u64,
+
+    pub const Param = enum(u32) {
+        hw_context_all = 0,
+    };
+
+    pub const HwContextEntry = extern struct {
+        context_id: u32,
+        start_col: u32,
+        num_col: u32,
+        hwctx_id: u32,
+        pid: i64,
+        command_submissions: u64,
+        command_completions: u64,
+        migrations: u64,
+        preemptions: u64,
+        errors: u64,
+        priority: u64,
+        heap_usage: u64,
+        suspensions: u64,
+        state: State,
+        pasid: u32,
+        gops: u32,
+        fps: u32,
+        dma_bandwidth: u32,
+        latency: u32,
+        frame_exec_time: u32,
+        txn_op_idx: u32,
+        ctx_pc: u32,
+        fatal_error_type: u32,
+        fatal_error_exception_type: u32,
+        fatal_error_exception_pc: u32,
+        fatal_error_app_module: u32,
+        pad: u32 = 0,
+
+        pub const State = enum(u32) {
+            idle = 0,
+            active = 1,
         };
     };
 };
@@ -207,6 +306,7 @@ pub const sync_bo_ioctl = drm.iowr(drm.command_base + 0x5, SyncBo);
 pub const exec_cmd_ioctl = drm.iowr(drm.command_base + 0x6, ExecCmd);
 pub const get_info_ioctl = drm.iowr(drm.command_base + 0x7, GetInfo);
 pub const set_state_ioctl = drm.iowr(drm.command_base + 0x8, SetState);
+pub const get_array_ioctl = drm.iowr(drm.command_base + 0xa, GetArray);
 
 const std = @import("std");
 const drm = @import("drm.zig");

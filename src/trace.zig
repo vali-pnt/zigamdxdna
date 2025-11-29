@@ -128,14 +128,15 @@ const Trace = struct {
     }
 
     fn readStr(self: Trace, addr: usize) ![]u8 {
-        var buf = std.ArrayList(u8).init(std.heap.page_allocator);
-        defer buf.deinit();
+        const gpa = std.heap.page_allocator;
+        var buf = std.ArrayList(u8).empty;
+        defer buf.deinit(gpa);
 
         var offset: usize = 0;
         while (true) {
             var word: usize = undefined;
             try posix.ptrace(linux.PTRACE.PEEKDATA, self.child, addr + offset, @intFromPtr(&word));
-            try buf.appendSlice(std.mem.asBytes(&word));
+            try buf.appendSlice(gpa, std.mem.asBytes(&word));
             if (std.mem.indexOfScalar(u8, buf.items[offset..], 0)) |i| {
                 buf.shrinkRetainingCapacity(offset + i);
                 break;
@@ -143,7 +144,7 @@ const Trace = struct {
             offset += @sizeOf(usize);
         }
 
-        return buf.toOwnedSlice();
+        return buf.toOwnedSlice(gpa);
     }
 
     fn readNBytes(self: Trace, addr: usize, n: comptime_int) ![n]u8 {

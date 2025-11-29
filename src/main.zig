@@ -32,6 +32,9 @@ pub fn main() !void {
 
     const hwctx = try driver.createHwctx();
     defer driver.destroyHwctx(hwctx);
+
+    const power_mode = try driver.getInfo(xdna.GetInfo.GetPowerMode, .get_power_mode);
+    std.debug.print("power mode: {}\n", .{power_mode.power_mode});
 }
 
 fn printTileMetadata(name: []const u8, tile: xdna.GetInfo.QueryAieMetadata.Tile) void {
