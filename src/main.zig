@@ -13,7 +13,7 @@ pub fn main() !void {
     printTileMetadata("mem", aie_metadata.mem);
     printTileMetadata("shim", aie_metadata.shim);
 
-    const dev_heap_size = 64 * 1024 * 1024; // 64MB
+    const dev_heap_size = 64 * 1024 * 1024; // 64MiB
     const dev_heap_bo = try driver.createBo(.dev_heap, dev_heap_size);
     defer driver.destroyBo(dev_heap_bo);
     const dev_heap_bo_info = try driver.getBoInfo(dev_heap_bo);
@@ -35,6 +35,36 @@ pub fn main() !void {
 
     const power_mode = try driver.getInfo(xdna.GetInfo.GetPowerMode, .get_power_mode);
     std.debug.print("power mode: {}\n", .{power_mode.power_mode});
+
+    const cmd_bytes = [_]u8{
+        0xff, 0xff, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x24, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x10, 0x00, 0x00, 0x00,
+        0x16, 0x00, 0x00, 0x00,
+        0x07, 0x00, 0x00, 0x00,
+        0xff, 0x00, 0x00, 0x00,
+    };
+    const cmd_bo = try driver.createBo(.cmd, cmd_bytes.len);
+    defer driver.destroyBo(cmd_bo);
+    const cmd_bo_info = try driver.getBoInfo(cmd_bo);
+    const cmd_mem = try std.posix.mmap(null, cmd_bytes.len, std.os.linux.PROT.READ | std.os.linux.PROT.WRITE, .{ .TYPE = .SHARED, .ANONYMOUS = true }, -1, 0);
+    defer std.posix.munmap(cmd_mem);
+    const cmd_bo_map = try std.posix.mmap(
+        cmd_mem.ptr,
+        cmd_bytes.len,
+        std.os.linux.PROT.EXEC | std.os.linux.PROT.READ | std.os.linux.PROT.WRITE,
+        .{ .TYPE = .SHARED, .LOCKED = true, .FIXED = true },
+        driver.fd,
+        cmd_bo_info.map_offset,
+    );
+    defer std.posix.munmap(cmd_bo_map);
+    @memcpy(cmd_bo_map, &cmd_bytes);
+
+    const seq = try driver.execCmd(hwctx, cmd_bo);
+    std.debug.print("submitted cmd, seq: {}\n", .{seq});
 }
 
 fn printTileMetadata(name: []const u8, tile: xdna.GetInfo.QueryAieMetadata.Tile) void {
@@ -45,103 +75,7 @@ fn printTileMetadata(name: []const u8, tile: xdna.GetInfo.QueryAieMetadata.Tile)
     std.debug.print(", dma channels: {}, locks: {}, event regs: {}\n", .{ tile.dma_channel_count, tile.lock_count, tile.event_reg_count });
 }
 
-const Driver = struct {
-    fd: std.posix.fd_t,
-
-    const Self = @This();
-
-    pub fn init(path: []const u8) !Self {
-        const fd = try std.posix.open(path, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0);
-        return .{ .fd = fd };
-    }
-
-    pub fn deinit(self: Self) void {
-        std.posix.close(self.fd);
-    }
-
-    fn getInfo(self: Self, comptime T: type, param: xdna.GetInfo.Param) !T {
-        var param_data: T = undefined;
-        const get_info = xdna.GetInfo{
-            .param = param,
-            .buffer = @intFromPtr(&param_data),
-            .buffer_size = @sizeOf(T),
-        };
-        try self.ioctl(xdna.get_info_ioctl, &get_info);
-        return param_data;
-    }
-
-    pub fn queryAieMetadata(self: Self) !xdna.GetInfo.QueryAieMetadata {
-        return self.getInfo(xdna.GetInfo.QueryAieMetadata, .query_aie_metadata);
-    }
-
-    pub fn queryAieVersion(self: Self) !xdna.GetInfo.QueryAieVersion {
-        return self.getInfo(xdna.GetInfo.QueryAieVersion, .query_aie_version);
-    }
-
-    pub fn queryFirmwareVersion(self: Self) !xdna.GetInfo.QueryFirmwareVersion {
-        return self.getInfo(xdna.GetInfo.QueryFirmwareVersion, .query_firmware_version);
-    }
-
-    pub fn createBo(self: Self, ty: xdna.CreateBo.Type, size: u64) !u32 {
-        var create_bo = xdna.CreateBo{ .type = ty, .size = size };
-        try self.ioctl(xdna.create_bo_ioctl, &create_bo);
-        return create_bo.handle;
-    }
-
-    pub fn destroyBo(self: Self, handle: u32) void {
-        const gem_close = drm.GemClose{ .handle = handle };
-        self.ioctl(drm.gem_close_ioctl, &gem_close) catch {
-            std.log.warn("destroyBo failed\n", .{});
-        };
-    }
-
-    pub const BoInfo = struct {
-        map_offset: u64,
-        vaddr: u64,
-        xdna_vaddr: u64,
-    };
-
-    pub fn getBoInfo(self: Self, handle: u32) !BoInfo {
-        var get_bo_info = xdna.GetBoInfo{ .handle = handle };
-        try self.ioctl(xdna.get_bo_info_ioctl, &get_bo_info);
-        return .{
-            .map_offset = get_bo_info.map_offset,
-            .vaddr = get_bo_info.vaddr,
-            .xdna_vaddr = get_bo_info.xdna_vaddr,
-        };
-    }
-
-    pub fn createHwctx(self: Self) !u32 {
-        const qos_info = xdna.QosInfo{
-            .gops = 100,
-            .fps = 0,
-            .dma_bandwidth = 0,
-            .latency = 0,
-            .frame_exec_time = 0,
-            .priority = 384,
-        };
-        var create_hwctx = xdna.CreateHwctx{
-            .qos_p = @intFromPtr(&qos_info),
-            .umq_bo = 0,
-            .log_buf_bo = 0,
-            .max_opc = 8192,
-            .num_tiles = 16,
-            .mem_size = 0,
-        };
-        try self.ioctl(xdna.create_hwctx_ioctl, &create_hwctx);
-        return create_hwctx.handle;
-    }
-
-    pub fn destroyHwctx(self: Self, handle: u32) void {
-        const destroy_hwctx = xdna.DestroyHwctx{ .handle = handle };
-        self.ioctl(xdna.destroy_hwctx_ioctl, &destroy_hwctx) catch {};
-    }
-
-    pub fn ioctl(self: Self, request: u32, arg: anytype) !void {
-        if (std.os.linux.ioctl(self.fd, request, @intFromPtr(arg)) != 0) return error.Fail;
-    }
-};
-
 const std = @import("std");
 const drm = @import("drm.zig");
 const xdna = @import("xdna.zig");
+const Driver = @import("Driver.zig");

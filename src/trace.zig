@@ -16,20 +16,32 @@ pub fn main() !u8 {
         return @intCast(linux.execve(@ptrCast(child_path), child_args, &.{}));
     } else {
         var trace = try Trace.init(child_pid);
+        defer trace.deinit();
         try trace.run();
     }
 
     return 0;
 }
 
+const BoTrace = struct {
+    size: u64,
+    type: xdna.CreateBo.Type,
+    info: ?Driver.BoInfo = null,
+};
+
 const Trace = struct {
     child: posix.pid_t,
     xdna_fd: ?usize = null,
+    bos: std.AutoHashMap(u32, BoTrace) = .init(std.heap.page_allocator),
 
     pub fn init(child: posix.pid_t) !Trace {
         _ = posix.waitpid(child, 0);
         try posix.ptrace(linux.PTRACE.SETOPTIONS, child, 0, PTRACE_O_TRACESYSGOOD);
         return .{ .child = child };
+    }
+
+    pub fn deinit(self: *Trace) void {
+        self.bos.deinit();
     }
 
     pub fn run(self: *Trace) !void {
@@ -53,7 +65,7 @@ const Trace = struct {
                     const path = try self.readStr(arg1);
                     defer std.heap.page_allocator.free(path);
                     if (signed >= 0 and std.mem.eql(u8, path, "/dev/accel/accel0")) {
-                        std.debug.print("-- openat(\"{s}\") = {}\n", .{ path, signed });
+                        self.log("openat(\"{s}\") = {}", .{ path, signed });
                         if (self.xdna_fd) |_| return error.TwoXdnaOpenedAtOnce;
                         self.xdna_fd = ret;
                     }
@@ -66,7 +78,7 @@ const Trace = struct {
                     const path = try self.readStr(arg0);
                     defer std.heap.page_allocator.free(path);
                     if (signed >= 0 and std.mem.eql(u8, path, "/dev/accel/accel0")) {
-                        std.debug.print("-- open(\"{s}\") = {}\n", .{ path, signed });
+                        self.log("open(\"{s}\") = {}", .{ path, signed });
                         if (self.xdna_fd) |_| return error.TwoXdnaOpenedAtOnce;
                         self.xdna_fd = ret;
                     }
@@ -74,7 +86,7 @@ const Trace = struct {
                 .close => {
                     if (self.xdna_fd == arg0) {
                         self.xdna_fd = null;
-                        std.debug.print("-- close({})\n", .{arg0});
+                        self.log("close({})", .{arg0});
                     }
                     if (self.waitSyscall()) break;
                 },
@@ -89,17 +101,20 @@ const Trace = struct {
                     const after = try self.getRegs();
                     const ret = after.regs.rax;
                     if (self.xdna_fd == arg4) {
-                        std.debug.print("mmap(addr: 0x{x}, length: {}, prot: ", .{ arg0, arg1 });
-                        const prot = arg2;
-                        if (prot | linux.PROT.EXEC != 0) std.debug.print("EXEC | ", .{});
-                        if (prot | linux.PROT.READ != 0) std.debug.print("READ | ", .{});
-                        if (prot | linux.PROT.WRITE != 0) std.debug.print("WRITE", .{});
                         const flags: linux.MAP = @bitCast(@as(u32, @truncate(arg3)));
-                        std.debug.print(", flags: {s} | ", .{@tagName(flags.TYPE)});
-                        if (flags.ANONYMOUS) std.debug.print("ANONYMOUS | ", .{});
-                        if (flags.FIXED) std.debug.print("FIXED | ", .{});
-                        if (flags.LOCKED) std.debug.print("LOCKED", .{});
-                        std.debug.print(", offset: 0x{x}) = 0x{x}\n", .{ arg5, ret });
+                        self.log("mmap(addr: 0x{x}, length: {}, prot: {s}{s}{s}, flags: {s} |{s}{s}{s}, offset: 0x{x}) = 0x{x}", .{
+                            arg0,
+                            arg1,
+                            if (arg2 | linux.PROT.EXEC != 0) "EXEC | " else "",
+                            if (arg2 | linux.PROT.READ != 0) "READ | " else "",
+                            if (arg2 | linux.PROT.WRITE != 0) "WRITE" else "",
+                            @tagName(flags.TYPE),
+                            if (flags.ANONYMOUS) " ANONYMOUS |" else "",
+                            if (flags.FIXED) " FIXED |" else "",
+                            if (flags.LOCKED) " LOCKED" else "",
+                            arg5,
+                            ret,
+                        });
                     }
                 },
                 else => {
@@ -147,6 +162,24 @@ const Trace = struct {
         return buf.toOwnedSlice(gpa);
     }
 
+    fn readSlice(self: Trace, addr: usize, len: usize) ![]u8 {
+        const gpa = std.heap.page_allocator;
+        var buf = try gpa.alloc(u8, len);
+        errdefer gpa.free(buf);
+        var offset: usize = 0;
+
+        while (offset < len) {
+            var word: usize = undefined;
+            try posix.ptrace(linux.PTRACE.PEEKDATA, self.child, addr + offset, @intFromPtr(&word));
+            if (len - offset < @sizeOf(usize)) {
+                @memcpy(buf[offset..], std.mem.asBytes(&word)[0..(len - offset)]);
+            } else @memcpy(buf[offset..(offset + @sizeOf(usize))], std.mem.asBytes(&word));
+            offset += @sizeOf(usize);
+        }
+
+        return buf;
+    }
+
     fn readNBytes(self: Trace, addr: usize, n: comptime_int) ![n]u8 {
         const wordsize = @sizeOf(usize);
         var bytes: [n]u8 = undefined;
@@ -169,102 +202,134 @@ const Trace = struct {
         return std.mem.bytesToValue(T, &bytes);
     }
 
-    fn printIoctlBefore(self: Trace, cmd: u32, arg: usize) !void {
+    fn printIoctlBefore(self: *Trace, cmd: u32, arg: usize) !void {
         switch (cmd) {
             xdna.create_hwctx_ioctl => {
                 const s = try self.readStruct(arg, xdna.CreateHwctx);
                 const qos = try self.readStruct(s.qos_p, xdna.QosInfo);
-                std.debug.print("CreateHwctx:\n", .{});
-                std.debug.print("  qos:\n", .{});
-                std.debug.print("    gops: {}\n", .{qos.gops});
-                std.debug.print("    fps: {}\n", .{qos.fps});
-                std.debug.print("    dma_bandwidth: {}\n", .{qos.dma_bandwidth});
-                std.debug.print("    latency: {}\n", .{qos.latency});
-                std.debug.print("    frame_exec_time: {}\n", .{qos.frame_exec_time});
-                std.debug.print("    priority: {}\n", .{qos.priority});
-                std.debug.print("  umq_bo: {}\n", .{s.umq_bo});
-                std.debug.print("  log_buf_bo: {}\n", .{s.log_buf_bo});
-                std.debug.print("  max_opc: {}\n", .{s.max_opc});
-                std.debug.print("  num_tiles: {}\n", .{s.num_tiles});
-                std.debug.print("  mem_size: {}\n", .{s.mem_size});
+
+                self.log("CreateHwctx:", .{});
+                self.log("  qos:", .{});
+                self.log("    gops: {}", .{qos.gops});
+                self.log("    fps: {}", .{qos.fps});
+                self.log("    dma_bandwidth: {}", .{qos.dma_bandwidth});
+                self.log("    latency: {}", .{qos.latency});
+                self.log("    frame_exec_time: {}", .{qos.frame_exec_time});
+                self.log("    priority: {}", .{qos.priority});
+                self.log("  umq_bo: {}", .{s.umq_bo});
+                self.log("  log_buf_bo: {}", .{s.log_buf_bo});
+                self.log("  max_opc: {}", .{s.max_opc});
+                self.log("  num_tiles: {}", .{s.num_tiles});
+                self.log("  mem_size: {}", .{s.mem_size});
             },
             xdna.destroy_hwctx_ioctl => {
                 const s = try self.readStruct(arg, xdna.DestroyHwctx);
-                std.debug.print("DestroyHwctx:\n", .{});
-                std.debug.print("  handle: {}\n", .{s.handle});
+
+                self.log("DestroyHwctx:", .{});
+                self.log("  handle: {}", .{s.handle});
             },
             xdna.config_hwctx_ioctl => {
-                std.debug.print("ConfigHwctx\n", .{});
+                const s = try self.readStruct(arg, xdna.ConfigHwctx);
+                self.log("ConfigHwctx:", .{});
+                self.log("  handle: {}", .{s.handle});
+                self.log("  param_type: {}", .{s.param_type});
+                if (s.param_type == xdna.ConfigHwctx.Param.config_cu) {
+                    const num_cus = try self.readStruct(s.param_val, u16);
+                    self.log("    ConfigCu:", .{});
+                    for (0..num_cus) |i| {
+                        const cu_config = try self.readStruct(
+                            s.param_val + 8 + @sizeOf(xdna.ConfigHwctx.CuConfig) * i,
+                            xdna.ConfigHwctx.CuConfig,
+                        );
+                        self.log("      cu_bo: {}, cu_func: {}", .{ cu_config.cu_bo, cu_config.cu_func });
+                        const bo_trace = self.bos.getPtr(cu_config.cu_bo).?;
+                        const data = try self.readSlice(bo_trace.info.?.vaddr, bo_trace.size);
+                        defer std.heap.page_allocator.free(data);
+                        self.log("        data: {x}", .{data});
+                    }
+                }
             },
             xdna.create_bo_ioctl => {
                 const s = try self.readStruct(arg, xdna.CreateBo);
-                std.debug.print("CreateBo:\n", .{});
-                std.debug.print("  size: {}\n", .{s.size});
-                std.debug.print("  type: {s}\n", .{@tagName(s.type)});
+                self.log("CreateBo:", .{});
+                self.log("  size: {}", .{s.size});
+                self.log("  type: {s}", .{@tagName(s.type)});
             },
             xdna.get_bo_info_ioctl => {
                 const s = try self.readStruct(arg, xdna.GetBoInfo);
-                std.debug.print("GetBoInfo:\n", .{});
-                std.debug.print("  handle: {}\n", .{s.handle});
+                self.log("GetBoInfo:", .{});
+                self.log("  handle: {}", .{s.handle});
             },
             xdna.sync_bo_ioctl => {
-                std.debug.print("SyncBo\n", .{});
+                self.log("SyncBo", .{});
             },
             xdna.exec_cmd_ioctl => {
-                std.debug.print("ExecCmd\n", .{});
+                self.log("ExecCmd", .{});
             },
             xdna.get_info_ioctl => {
-                std.debug.print("GetInfo:\n", .{});
+                self.log("GetInfo", .{});
             },
             xdna.set_state_ioctl => {
-                std.debug.print("SetState\n", .{});
+                self.log("SetState", .{});
             },
             drm.gem_close_ioctl => {
                 const s = try self.readStruct(arg, drm.GemClose);
-                std.debug.print("GemClose:\n", .{});
-                std.debug.print("  handle: {}\n", .{s.handle});
+                _ = self.bos.remove(s.handle);
+                self.log("GemClose:", .{});
+                self.log("  handle: {}", .{s.handle});
             },
             else => {
                 const req: linux.IOCTL.Request = @bitCast(cmd);
-                std.debug.print("Unknown(type: {} nr: {}, size: {})\n", .{ req.io_type, req.nr, req.size });
+                self.log("Unknown(type: {} nr: {}, size: {})", .{ req.io_type, req.nr, req.size });
             },
         }
     }
 
-    fn printIoctlAfter(self: Trace, cmd: u32, arg: usize, ret: usize) !void {
+    fn printIoctlAfter(self: *Trace, cmd: u32, arg: usize, ret: usize) !void {
         switch (cmd) {
             xdna.create_hwctx_ioctl => {
                 const s = try self.readStruct(arg, xdna.CreateHwctx);
-                std.debug.print("  => umq_doorbell: {}\n", .{s.umq_doorbell});
-                std.debug.print("  => handle: {}\n", .{s.handle});
-                std.debug.print("  => syncobj_handle: {}\n", .{s.syncobj_handle});
-                std.debug.print("  ret: {}\n", .{ret});
+                self.log("  => umq_doorbell: {}", .{s.umq_doorbell});
+                self.log("  => handle: {}", .{s.handle});
+                self.log("  => syncobj_handle: {}", .{s.syncobj_handle});
+                self.log("  ret: {}", .{ret});
             },
             xdna.create_bo_ioctl => {
                 const s = try self.readStruct(arg, xdna.CreateBo);
-                std.debug.print("  => handle: {}\n", .{s.handle});
-                std.debug.print("  ret: {}\n", .{ret});
+                try self.bos.put(s.handle, .{ .size = s.size, .type = s.type });
+                self.log("  => handle: {}", .{s.handle});
+                self.log("  ret: {}", .{ret});
             },
             xdna.get_bo_info_ioctl => {
                 const s = try self.readStruct(arg, xdna.GetBoInfo);
-                std.debug.print("  => map_offset: 0x{x}\n", .{s.map_offset});
-                std.debug.print("  => vaddr: 0x{x}\n", .{s.vaddr});
-                std.debug.print("  => xdna_vaddr: 0x{x}\n", .{s.xdna_vaddr});
-                std.debug.print("  ret: {}\n", .{ret});
+                const bo_trace = self.bos.getPtr(s.handle).?;
+                bo_trace.info = .{
+                    .map_offset = s.map_offset,
+                    .vaddr = s.vaddr,
+                    .xdna_vaddr = s.xdna_vaddr,
+                };
+                self.log("  => map_offset: 0x{x}", .{s.map_offset});
+                self.log("  => vaddr: 0x{x}", .{s.vaddr});
+                self.log("  => xdna_vaddr: 0x{x}", .{s.xdna_vaddr});
+                self.log("  ret: {}", .{ret});
             },
             xdna.get_info_ioctl => {
                 const s = try self.readStruct(arg, xdna.GetInfo);
                 switch (s.param) {
                     .query_aie_metadata => {
                         const q = try self.readStruct(s.buffer, xdna.GetInfo.QueryAieMetadata);
-                        std.debug.print("  QueryAieMetadata: {}\n", .{q});
+                        self.log("  QueryAieMetadata: {}", .{q});
                     },
                     else => {},
                 }
-                std.debug.print("  ret: {}\n", .{ret});
+                self.log("  ret: {}", .{ret});
             },
             else => {},
         }
+    }
+
+    fn log(_: Trace, comptime fmt: []const u8, args: anytype) void {
+        std.debug.print("[xdnatrace] " ++ fmt ++ "\n", args);
     }
 };
 
@@ -276,3 +341,4 @@ const linux = std.os.linux;
 const c = @cImport(@cInclude("sys/user.h"));
 const drm = @import("drm.zig");
 const xdna = @import("xdna.zig");
+const Driver = @import("Driver.zig");
